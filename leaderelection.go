@@ -2,6 +2,7 @@ package leaderelection
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"sync"
@@ -21,9 +22,9 @@ type Node struct {
 	errorc       chan error
 	stopc        chan struct{}
 	peerChangedC chan struct{}
+	rpcC         chan RPC
 
 	heartbeatTimeout time.Duration
-	voteC            chan struct{}
 	heartbeatC       chan HeartBeatMsg
 }
 
@@ -48,14 +49,10 @@ func randomTimeout(minVal time.Duration) time.Duration {
 }
 
 func (n *Node) Run(ctx context.Context) error {
-	go func() {
-		n.errorc <- n.transport.Run()
-	}()
 	for {
 		select {
 		case <-ctx.Done():
 			close(n.stopc)
-			n.transport.Stop()
 			return ctx.Err()
 		case err := <-n.errorc:
 			return err
@@ -80,11 +77,15 @@ func (n *Node) runFollower() {
 	for n.getState() == Follower {
 		select {
 		case msg := <-n.heartbeatC:
+			heartbeatTimer.Reset(n.heartbeatTimeout)
 			if msg.Term >= n.getCurrentTerm() {
-				heartbeatTimer.Reset(n.heartbeatTimeout)
 				n.setCurrentTerm(msg.Term)
+			}
+			if msg.Lead != n.getLead() {
 				n.setLead(msg.Lead)
 			}
+		case rpc := <-n.rpcC:
+			n.processRPC(rpc)
 		case <-heartbeatTimer.C:
 			n.setState(Candidate)
 		case <-n.stopc:
@@ -97,6 +98,7 @@ func (n *Node) runCandidate() {
 	log.Printf("Node %d is running for election", n.id)
 	n.setCurrentTerm(n.getCurrentTerm() + 1)
 	for n.getState() == Candidate {
+		// start vote
 		select {
 		case msg := <-n.heartbeatC:
 			// has new leader
@@ -105,7 +107,6 @@ func (n *Node) runCandidate() {
 				n.setCurrentTerm(msg.Term)
 				n.setLead(msg.Lead)
 			}
-		case <-n.voteC:
 		case <-n.stopc:
 			return
 		}
@@ -114,6 +115,8 @@ func (n *Node) runCandidate() {
 }
 
 func (n *Node) runLeader() {
+	// start heartbeat goroutine
+	n.heartbeat()
 	for n.getState() == Leader {
 		select {
 		case msg := <-n.heartbeatC:
@@ -153,4 +156,27 @@ func (n *Node) RemovePeer(id uint64) {
 	defer n.peerMu.Unlock()
 	delete(n.peers, id)
 	n.peerChangedC <- struct{}{}
+}
+
+func (n *Node) processRPC(rpc RPC) {
+	switch cmd := rpc.Command.(type) {
+	case *HeartBeatRequest:
+		n.processHeartBeat(rpc, cmd)
+	default:
+		rpc.Respond(nil, errors.New("unknown command"))
+	}
+}
+
+func (n *Node) processHeartBeat(rpc RPC, req *HeartBeatRequest) {
+	resp := &HeartBeatResponse{Success: true}
+	if req.Term < n.getCurrentTerm() {
+		resp.Success = false
+		rpc.Respond(resp, nil)
+		return
+	}
+	rpc.Respond(resp, nil)
+}
+
+func (n *Node) heartbeat() {
+
 }
