@@ -32,8 +32,8 @@ type electionState struct {
 	state State
 	// currentTerm is the latest term the server has seen
 	currentTerm uint64
-	// votedFor is the candidateId that received vote in current term
-	votedFor uint64
+	// votedTerm is the term the server voted for
+	votedTerm uint64
 }
 
 func (s *electionState) getState() State {
@@ -54,10 +54,10 @@ func (s *electionState) setCurrentTerm(term uint64) {
 	atomic.StoreUint64(&s.currentTerm, term)
 }
 
-func (s *electionState) getVotedFor() uint64 {
-	return atomic.LoadUint64(&s.votedFor)
+func (s *electionState) getVotedTerm() uint64 {
+	return atomic.LoadUint64(&s.votedTerm)
 }
 
-func (s *electionState) setVotedFor(votedFor uint64) {
-	atomic.StoreUint64(&s.votedFor, votedFor)
+func (s *electionState) setVotedTerm(votedTerm uint64) {
+	atomic.StoreUint64(&s.votedTerm, votedTerm)
 }
