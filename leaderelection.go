@@ -5,8 +5,10 @@
 package leaderelection
 
 import (
+	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -25,17 +27,18 @@ type Node struct {
 	errorc       chan error
 	stopc        chan struct{}
 	peerChangedC chan struct{}
-	rpcC         chan RPC
+	rpcC         <-chan RPC
 
 	// lastContact is the last time we had contact from the leader
 	lastContact   time.Time
 	lastContactMu sync.RWMutex
 
 	heartbeatTimeout time.Duration
+	electionTimeout  time.Duration
 }
 
 // NewNode returns new Node.
-func NewNode(id uint64, peers map[uint64]string) *Node {
+func NewNode(id uint64, peers map[uint64]string, transport Transport) *Node {
 	return &Node{
 		id:               id,
 		peers:            peers,
@@ -44,6 +47,9 @@ func NewNode(id uint64, peers map[uint64]string) *Node {
 		stopc:        make(chan struct{}),
 		peerChangedC: make(chan struct{}),
 		errorc:       make(chan error),
+
+		transport: transport,
+		rpcC:      transport.Consumer(),
 	}
 }
 
@@ -60,6 +66,8 @@ func (n *Node) Run() error {
 		select {
 		case err := <-n.errorc:
 			return err
+		case <-n.stopc:
+			return nil
 		default:
 		}
 
@@ -102,11 +110,39 @@ func (n *Node) runFollower() {
 
 func (n *Node) runCandidate() {
 	slog.Info("start election", "node", n.id)
-	n.setCurrentTerm(n.getCurrentTerm() + 1)
+	voteResC := n.electSelf()
+
+	granted := 0
+	votesNeeded := n.quorumSize()
+
+	electionTimeout := RandomTimeout(n.electionTimeout)
+
 	for n.getState() == Candidate {
 		select {
 		case rpc := <-n.rpcC:
 			n.processRPC(rpc)
+		case res := <-voteResC:
+			if res.Term > n.getCurrentTerm() {
+				slog.Info("term out of date", "node", n.id, "currentTerm", n.getCurrentTerm(), "resTerm", res.Term)
+				n.setCurrentTerm(res.Term)
+				n.setState(Follower)
+				return
+			}
+
+			if res.Granted {
+				granted++
+				slog.Info("vote granted", "node", n.id, "voter", res.VoterID, "granted", granted)
+			}
+
+			if granted >= votesNeeded {
+				slog.Info("become leader", "node", n.id)
+				n.setState(Leader)
+				n.setLead(n.id)
+				return
+			}
+		case <-electionTimeout:
+			slog.Info("election timeout", "node", n.id)
+			return
 		case <-n.stopc:
 			return
 		}
@@ -123,6 +159,49 @@ func (n *Node) runLeader() {
 			return
 		}
 	}
+}
+
+func (n *Node) electSelf() <-chan *VoteResponse {
+	respC := make(chan *VoteResponse, len(n.getPeers()))
+	req := &VoteRequest{
+		Candidate: n.id,
+		Term:      n.getCurrentTerm(),
+	}
+
+	for id, addr := range n.getPeers() {
+		if id == n.id {
+			respC <- &VoteResponse{
+				VoterID: n.id,
+				Granted: true,
+				Term:    req.Term,
+			}
+		} else {
+			go func(addr string) {
+				resp := &VoteResponse{}
+				ctx, cancel := context.WithTimeout(context.Background(), n.electionTimeout)
+				defer cancel()
+				err := n.transport.SendVoteRequest(ctx, addr, req, resp)
+				if err != nil {
+					resp.Granted = false
+					resp.Term = req.Term
+				}
+				respC <- resp
+			}(addr)
+		}
+	}
+	return respC
+}
+
+func (n *Node) getPeers() map[uint64]string {
+	n.peerMu.RLock()
+	defer n.peerMu.RUnlock()
+	res := make(map[uint64]string, len(n.peers))
+	maps.Copy(n.peers, res)
+	return res
+}
+
+func (n *Node) quorumSize() int {
+	return len(n.getPeers())/2 + 1
 }
 
 func (n *Node) getLead() uint64 {
@@ -180,7 +259,34 @@ func (n *Node) processHeartBeat(rpc RPC, req *HeartBeatRequest) {
 }
 
 func (n *Node) processVoteRequest(rpc RPC, req *VoteRequest) {
+	resp := &VoteResponse{VoterID: n.id, Term: n.getCurrentTerm()}
+	var respErr error
+	defer func() {
+		rpc.Respond(resp, respErr)
+	}()
 
+	if req.Term < n.getCurrentTerm() {
+		slog.Info("rejecting vote request", "node", n.id, "reqTerm", req.Term, "currentTerm", n.getCurrentTerm())
+		return
+	}
+
+	if req.Term > n.getCurrentTerm() {
+		slog.Info("get newer", "node", n.id, "reqTerm", req.Term, "currentTerm", n.getCurrentTerm())
+		n.setState(Follower)
+		n.setCurrentTerm(req.Term)
+		resp.Term = req.Term
+	}
+
+	if req.Term <= n.getVotedTerm() {
+		slog.Info("rejecting vote request, already voted", "node", n.id, "reqTerm", req.Term, "votedTerm", n.getVotedTerm())
+		return
+	}
+
+	slog.Info("voting for", "node", n.id, "candidate", req.Candidate, "reqTerm", req.Term)
+	resp.Granted = true
+	n.setVotedTerm(req.Term)
+	n.setCurrentTerm(req.Term)
+	n.setLastContact()
 }
 
 func (n *Node) heartbeat() {

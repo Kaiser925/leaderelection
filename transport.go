@@ -22,6 +22,8 @@ type VoteRequest struct {
 
 // VoteResponse is the response send by the follower to the candidate.
 type VoteResponse struct {
+	VoterID uint64
+	Term    uint64 // Voter term.
 	Granted bool   // True means candidate received vote.
 	Reason  string // Used for debugging.
 }
@@ -45,9 +47,9 @@ func (r *RPC) Respond(resp any, err error) {
 // to allow node to communicate with other nodes.
 type Transport interface {
 	// SendVoteRequest sends a vote request message to the given peer.
-	SendVoteRequest(ctx context.Context, peer string, msg VoteRequest) (VoteResponse, error)
+	SendVoteRequest(ctx context.Context, peer string, msg *VoteRequest, resp *VoteResponse) error
 	// SendHeartbeat sends a heartbeat message to the given peer.
-	SendHeartbeat(ctx context.Context, peer string, msg HeartBeatMsg) (HeartBeatResponse, error)
+	SendHeartbeat(ctx context.Context, peer string, msg *HeartBeatMsg, resp *HeartBeatResponse) error
 	// Consumer returns a channel that can be used to
 	// consume and respond to RPC requests.
 	Consumer() <-chan RPC
