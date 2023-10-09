@@ -11,4 +11,5 @@ type HeartBeatRequest struct {
 
 type HeartBeatResponse struct {
 	Success bool
+	Term    uint64
 }

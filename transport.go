@@ -14,8 +14,8 @@ type HeartBeatMsg struct {
 	Term uint64 // Current term.
 }
 
-// VoteMsg is the message sent by the candidate to the followers.
-type VoteMsg struct {
+// VoteRequest is the message sent by the candidate to the followers.
+type VoteRequest struct {
 	Candidate uint64 // Candidate requesting vote.
 	Term      uint64 // Candidate's term.
 }
@@ -27,17 +27,17 @@ type VoteResponse struct {
 }
 
 type RPCResponse struct {
-	Response interface{}
+	Response any
 	Error    error
 }
 
 type RPC struct {
-	Command  interface{}
+	Command  any
 	RespChan chan<- RPCResponse
 }
 
 // Respond is used to respond with a response, error or both
-func (r *RPC) Respond(resp interface{}, err error) {
+func (r *RPC) Respond(resp any, err error) {
 	r.RespChan <- RPCResponse{resp, err}
 }
 
@@ -45,7 +45,7 @@ func (r *RPC) Respond(resp interface{}, err error) {
 // to allow node to communicate with other nodes.
 type Transport interface {
 	// SendVoteRequest sends a vote request message to the given peer.
-	SendVoteRequest(ctx context.Context, peer string, msg VoteMsg) (VoteResponse, error)
+	SendVoteRequest(ctx context.Context, peer string, msg VoteRequest) (VoteResponse, error)
 	// SendHeartbeat sends a heartbeat message to the given peer.
 	SendHeartbeat(ctx context.Context, peer string, msg HeartBeatMsg) (HeartBeatResponse, error)
 	// Consumer returns a channel that can be used to

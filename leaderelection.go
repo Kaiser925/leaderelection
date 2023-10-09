@@ -5,9 +5,8 @@
 package leaderelection
 
 import (
-	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -28,8 +27,11 @@ type Node struct {
 	peerChangedC chan struct{}
 	rpcC         chan RPC
 
+	// lastContact is the last time we had contact from the leader
+	lastContact   time.Time
+	lastContactMu sync.RWMutex
+
 	heartbeatTimeout time.Duration
-	heartbeatC       chan HeartBeatMsg
 }
 
 // NewNode returns new Node.
@@ -53,12 +55,9 @@ func randomTimeout(minVal time.Duration) time.Duration {
 	return minVal + extra
 }
 
-func (n *Node) Run(ctx context.Context) error {
+func (n *Node) Run() error {
 	for {
 		select {
-		case <-ctx.Done():
-			close(n.stopc)
-			return ctx.Err()
 		case err := <-n.errorc:
 			return err
 		default:
@@ -75,23 +74,25 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 }
 
+func (n *Node) Stop() {
+	close(n.stopc)
+}
+
 func (n *Node) runFollower() {
-	heartbeatTimer := time.NewTimer(n.heartbeatTimeout)
-	defer heartbeatTimer.Stop()
+	heartbeatTimer := RandomTimeout(n.heartbeatTimeout)
 
 	for n.getState() == Follower {
 		select {
-		case msg := <-n.heartbeatC:
-			heartbeatTimer.Reset(n.heartbeatTimeout)
-			if msg.Term >= n.getCurrentTerm() {
-				n.setCurrentTerm(msg.Term)
-			}
-			if msg.Lead != n.getLead() {
-				n.setLead(msg.Lead)
-			}
 		case rpc := <-n.rpcC:
 			n.processRPC(rpc)
-		case <-heartbeatTimer.C:
+		case <-heartbeatTimer:
+			lastContact := n.getLastContact()
+			// restart heartbeat timer
+			heartbeatTimer = RandomTimeout(n.heartbeatTimeout)
+			if time.Since(lastContact) < n.heartbeatTimeout {
+				continue
+			}
+			slog.Info("heartbeat timeout", "node", n.id, "lastContact", lastContact)
 			n.setState(Candidate)
 		case <-n.stopc:
 			return
@@ -100,18 +101,12 @@ func (n *Node) runFollower() {
 }
 
 func (n *Node) runCandidate() {
-	log.Printf("Node %d is running for election", n.id)
+	slog.Info("start election", "node", n.id)
 	n.setCurrentTerm(n.getCurrentTerm() + 1)
 	for n.getState() == Candidate {
-		// start vote
 		select {
-		case msg := <-n.heartbeatC:
-			// has new leader
-			if msg.Term > n.getCurrentTerm() {
-				n.setState(Follower)
-				n.setCurrentTerm(msg.Term)
-				n.setLead(msg.Lead)
-			}
+		case rpc := <-n.rpcC:
+			n.processRPC(rpc)
 		case <-n.stopc:
 			return
 		}
@@ -120,17 +115,10 @@ func (n *Node) runCandidate() {
 }
 
 func (n *Node) runLeader() {
-	// start heartbeat goroutine
-	n.heartbeat()
 	for n.getState() == Leader {
 		select {
-		case msg := <-n.heartbeatC:
-			// term is out of date
-			if msg.Term > n.getCurrentTerm() {
-				n.setState(Follower)
-				n.setCurrentTerm(msg.Term)
-				n.setLead(msg.Lead)
-			}
+		case rpc := <-n.rpcC:
+			n.processRPC(rpc)
 		case <-n.stopc:
 			return
 		}
@@ -167,21 +155,46 @@ func (n *Node) processRPC(rpc RPC) {
 	switch cmd := rpc.Command.(type) {
 	case *HeartBeatRequest:
 		n.processHeartBeat(rpc, cmd)
+	case *VoteRequest:
+		n.processVoteRequest(rpc, cmd)
 	default:
 		rpc.Respond(nil, errors.New("unknown command"))
 	}
 }
 
 func (n *Node) processHeartBeat(rpc RPC, req *HeartBeatRequest) {
-	resp := &HeartBeatResponse{Success: true}
+	resp := &HeartBeatResponse{Term: n.getCurrentTerm()}
 	if req.Term < n.getCurrentTerm() {
 		resp.Success = false
 		rpc.Respond(resp, nil)
 		return
 	}
+
+	if req.Term > n.getCurrentTerm() {
+		n.setCurrentTerm(req.Term)
+		n.setLead(req.Lead)
+	}
+
+	resp.Success = true
 	rpc.Respond(resp, nil)
+}
+
+func (n *Node) processVoteRequest(rpc RPC, req *VoteRequest) {
+
 }
 
 func (n *Node) heartbeat() {
 
+}
+
+func (n *Node) getLastContact() time.Time {
+	n.lastContactMu.RLock()
+	defer n.lastContactMu.RUnlock()
+	return n.lastContact
+}
+
+func (n *Node) setLastContact() {
+	n.lastContactMu.Lock()
+	defer n.lastContactMu.Unlock()
+	n.lastContact = time.Now()
 }
