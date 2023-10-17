@@ -49,7 +49,7 @@ type Transport interface {
 	// SendVoteRequest sends a vote request message to the given peer.
 	SendVoteRequest(ctx context.Context, peer string, msg *VoteRequest, resp *VoteResponse) error
 	// SendHeartbeat sends a heartbeat message to the given peer.
-	SendHeartbeat(ctx context.Context, peer string, msg *HeartBeatMsg, resp *HeartBeatResponse) error
+	SendHeartbeat(ctx context.Context, peer string, msg *HeartBeatMsg, resp *HeartbeatResponse) error
 	// Consumer returns a channel that can be used to
 	// consume and respond to RPC requests.
 	Consumer() <-chan RPC

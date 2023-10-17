@@ -26,7 +26,7 @@ type Node struct {
 
 	errorc       chan error
 	stopc        chan struct{}
-	peerChangedC chan struct{}
+	peerChangedC chan uint64
 	rpcC         <-chan RPC
 
 	// lastContact is the last time we had contact from the leader
@@ -45,7 +45,7 @@ func NewNode(id uint64, peers map[uint64]string, transport Transport) *Node {
 		heartbeatTimeout: randomTimeout(time.Second),
 
 		stopc:        make(chan struct{}),
-		peerChangedC: make(chan struct{}),
+		peerChangedC: make(chan uint64),
 		errorc:       make(chan error),
 
 		transport: transport,
@@ -151,10 +151,37 @@ func (n *Node) runCandidate() {
 }
 
 func (n *Node) runLeader() {
+	stopCs := make(map[uint64]chan struct{}, len(n.getPeers()))
+	defer func() {
+		for _, stopC := range stopCs {
+			close(stopC)
+		}
+	}()
+
+	for id, addr := range n.getPeers() {
+		if id == n.id {
+			continue
+		}
+		stopC := make(chan struct{})
+		go n.heartbeat(addr, stopC)
+		stopCs[id] = stopC
+	}
+
 	for n.getState() == Leader {
 		select {
 		case rpc := <-n.rpcC:
 			n.processRPC(rpc)
+		case id := <-n.peerChangedC:
+			stopc, ok := stopCs[id]
+			if ok {
+				close(stopc)
+				delete(stopCs, n.id)
+			} else {
+				stopC := make(chan struct{})
+				addr := n.getPeers()[id]
+				go n.heartbeat(addr, stopC)
+				stopCs[id] = stopC
+			}
 		case <-n.stopc:
 			return
 		}
@@ -220,19 +247,19 @@ func (n *Node) AddPeer(id uint64, url string) {
 	n.peerMu.Lock()
 	defer n.peerMu.Unlock()
 	n.peers[id] = url
-	n.peerChangedC <- struct{}{}
+	n.peerChangedC <- id
 }
 
 func (n *Node) RemovePeer(id uint64) {
 	n.peerMu.Lock()
 	defer n.peerMu.Unlock()
 	delete(n.peers, id)
-	n.peerChangedC <- struct{}{}
+	n.peerChangedC <- id
 }
 
 func (n *Node) processRPC(rpc RPC) {
 	switch cmd := rpc.Command.(type) {
-	case *HeartBeatRequest:
+	case *HeartbeatRequest:
 		n.processHeartBeat(rpc, cmd)
 	case *VoteRequest:
 		n.processVoteRequest(rpc, cmd)
@@ -241,8 +268,8 @@ func (n *Node) processRPC(rpc RPC) {
 	}
 }
 
-func (n *Node) processHeartBeat(rpc RPC, req *HeartBeatRequest) {
-	resp := &HeartBeatResponse{Term: n.getCurrentTerm()}
+func (n *Node) processHeartBeat(rpc RPC, req *HeartbeatRequest) {
+	resp := &HeartbeatResponse{Term: n.getCurrentTerm()}
 	if req.Term < n.getCurrentTerm() {
 		resp.Success = false
 		rpc.Respond(resp, nil)
@@ -289,8 +316,23 @@ func (n *Node) processVoteRequest(rpc RPC, req *VoteRequest) {
 	n.setLastContact()
 }
 
-func (n *Node) heartbeat() {
-
+func (n *Node) heartbeat(addr string, stopc chan struct{}) {
+	for {
+		select {
+		case <-RandomTimeout(n.heartbeatTimeout / 10):
+			req := &HeartBeatMsg{
+				Lead: n.id,
+				Term: n.getCurrentTerm(),
+			}
+			resp := HeartbeatResponse{}
+			err := n.transport.SendHeartbeat(context.Background(), addr, req, &resp)
+			if err != nil {
+				slog.Error("send heartbeat failed", "node", n.id, "addr", addr, "err", err)
+			}
+		case <-stopc:
+			return
+		}
+	}
 }
 
 func (n *Node) getLastContact() time.Time {

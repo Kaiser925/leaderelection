@@ -4,12 +4,12 @@
 
 package leaderelection
 
-type HeartBeatRequest struct {
+type HeartbeatRequest struct {
 	Lead uint64
 	Term uint64
 }
 
-type HeartBeatResponse struct {
+type HeartbeatResponse struct {
 	Success bool
 	Term    uint64
 }
