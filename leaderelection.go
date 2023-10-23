@@ -9,7 +9,6 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,11 +37,12 @@ type Node struct {
 }
 
 // NewNode returns new Node.
-func NewNode(id uint64, peers map[uint64]string, transport Transport) *Node {
+func NewNode(id uint64, heartbeatTimeout time.Duration, peers map[uint64]string,
+	transport Transport) *Node {
 	return &Node{
 		id:               id,
 		peers:            peers,
-		heartbeatTimeout: randomTimeout(time.Second),
+		heartbeatTimeout: heartbeatTimeout,
 
 		stopc:        make(chan struct{}),
 		peerChangedC: make(chan uint64),
@@ -51,14 +51,6 @@ func NewNode(id uint64, peers map[uint64]string, transport Transport) *Node {
 		transport: transport,
 		rpcC:      transport.Consumer(),
 	}
-}
-
-func randomTimeout(minVal time.Duration) time.Duration {
-	if minVal == 0 {
-		return 0
-	}
-	extra := time.Duration(rand.Int63()) % minVal
-	return minVal + extra
 }
 
 func (n *Node) Run() error {
@@ -131,7 +123,8 @@ func (n *Node) runCandidate() {
 
 			if res.Granted {
 				granted++
-				slog.Info("vote granted", "node", n.id, "voter", res.VoterID, "granted", granted)
+			} else {
+				slog.Info("vote not granted", "node", n.id, "voter", res.VoterID, "granted", granted)
 			}
 
 			if granted >= votesNeeded {
